@@ -1,0 +1,61 @@
+{{ if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+  labels:
+    app: {{ template "hyperglance.name" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ template "hyperglance.name" . }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+  {{- if .Values.networkPolicy.egress.allowDNS }}
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  {{- end }}
+  {{- if .Values.networkPolicy.egress.allowToCIDRs }}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    {{- range $p := .Values.networkPolicy.egress.ports }}
+    - protocol: TCP
+      port: {{ $p }}
+    {{- end }}
+  {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-ingress-allow
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ template "hyperglance.name" . }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+      {{- range $ns := .Values.networkPolicy.allowIngress.fromNamespaces }}
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: {{ $ns }}
+      {{- end }}
+      {{- range $sel := .Values.networkPolicy.allowIngress.fromPodSelectors }}
+      - podSelector:
+          {{- toYaml $sel | nindent 10 }}
+      {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.servicehttps.port | default 443 }}
+        - protocol: TCP
+          port: {{ .Values.servicehttp.port | default 80 }}
+{{ end }}

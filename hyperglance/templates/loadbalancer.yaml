@@ -1,0 +1,24 @@
+{{ if and (.Values.fargate.enabled) (not .Values.customLoadbalancer.enabled) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "hyperglance.name" . }}
+  namespace: {{.Values.fargate.namespace }}
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    # service.beta.kubernetes.io/aws-load-balancer-proxy-protocol: "*"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 443
+{{ end }}
+{{ if .Values.customLoadbalancer.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata: {{ .Values.customLoadbalancer.metadata }}
+spec: {{ .Values.customLoadbalancer.spec }}
+{{ end }}

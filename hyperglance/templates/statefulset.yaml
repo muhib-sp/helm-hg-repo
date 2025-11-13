@@ -1,0 +1,387 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "hyperglance.name" . }}
+  labels:
+    app: {{ template "hyperglance.name" . }}
+    chart: {{ template "hyperglance.chart" . }}
+    release: "{{ .Release.Name }}"
+    heritage: "{{ .Release.Service }}"
+    {{- include "hyperglance.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "hyperglance.name" . }}
+  replicas: {{ .Values.replicaCount }}
+  serviceName: "hyperglance-svc"
+  template:
+    metadata:
+      annotations:
+        timestamp: {{ now | date "2006-01-02T15:04:05" }}
+        {{- if .Values.podAnnotations }}
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+        {{- end }}
+      labels:
+        app: {{ template "hyperglance.name" . }}
+        {{- if .Values.podLabels }}
+        {{- toYaml .Values.podLabels | nindent 8 }}
+        {{- end }}        
+    spec:
+    {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- .Values.nodeSelector | toYaml | nindent 8 }}
+    {{- end }}
+    {{- if .Values.affinity }}
+      affinity:
+        {{- .Values.affinity | toYaml | nindent 8 }}
+    {{- end }}
+    {{- if .Values.tolerations }}
+      tolerations:
+        {{- .Values.tolerations | toYaml | nindent 8 }}
+    {{- end }}
+    {{- if .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+    {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 60 }}
+    {{ if .Values.serviceAccount.enabled }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+    {{ else }}
+    # CIS Control 5.1.5
+      automountServiceAccountToken: false
+    {{ end }}
+    {{ if .Values.privateImageRepo.enabled }}
+      imagePullSecrets:
+      {{ if .Values.privateImageRepo.existingSecretName }}
+      - name: {{ .Values.privateImageRepo.existingSecretName }}
+      {{ else }}
+      - name: {{ .Release.Name }}-repo-secret
+      {{ end }}
+    {{ end }}   
+      initContainers:
+      - name: init-apache
+        image: {{ .Values.init_apache.image | default "hyperglance/init" }}:{{ .Values.init_apache.tag | default "apache" }}
+        {{ if .Values.init_apache.enable_security_context }}
+        securityContext: 
+          {{- toYaml $.Values.init_apache.securityContext | nindent 10 }}
+        {{ end }}
+        resources:
+          {{- toYaml $.Values.init_apache.resources | nindent 10 }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        envFrom:
+        - configMapRef:
+            name: "{{ .Release.Name }}-env"
+        {{ if .Values.proxy.enabled }}
+        - secretRef:
+            name: "{{ .Release.Name }}-proxy-settings"
+        {{ end }}              
+        command: ['/bin/bash', '-c', 'init.sh']
+        volumeMounts:
+        - name: hyperglance-data
+          mountPath: /home/apache/data
+          readOnly: false
+    
+      {{ if not .Values.customPostgres.enabled }}
+      - name: init-postgres
+        image: {{ .Values.init_postgres.image | default "hyperglance/init" }}:{{ .Values.init_postgres.tag | default "postgres" }}
+        {{ if .Values.init_postgres.enable_security_context }}
+        securityContext: 
+          {{- toYaml $.Values.init_postgres.securityContext | nindent 10 }}
+        {{ end }}
+        resources:
+          {{- toYaml $.Values.init_apache.resources | nindent 10 }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        envFrom:
+        - configMapRef:
+            name: "{{ .Release.Name }}-env"        
+        command: ['/bin/bash', '-c', 'init.sh']
+        volumeMounts:
+        - name: postgresql-data
+          mountPath: /home/postgresql/pgsql
+          readOnly: false
+      {{ end }}
+
+      - name: init-wildfly
+        image: {{ .Values.init_wildfly.image | default "hyperglance/init" }}:{{ .Values.init_wildfly.tag | default "wildfly" }}
+        {{ if .Values.init_wildfly.enable_security_context }}
+        securityContext: 
+          {{- toYaml $.Values.init_wildfly.securityContext | nindent 10 }}
+        {{ end }}
+        resources:
+          {{- toYaml $.Values.init_wildfly.resources | nindent 10 }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        envFrom:
+        - configMapRef:
+            name: "{{ .Release.Name }}-env"        
+        command: ['/bin/bash', '-c', 'init.sh']
+        volumeMounts:
+        - name: hyperglance-data
+          mountPath: /home/wildfly/data
+          readOnly: false
+        - name: license
+          mountPath: /home/wildfly/license/hg.bin
+          subPath: hg.bin          
+
+      containers:
+      {{ if not .Values.customPostgres.enabled }}
+      - name: postgresql
+        image: {{ .Values.postgresql.image | default "hyperglance/postgresql-v2" }}:{{ .Values.postgresql.tag | default .Chart.AppVersion }}
+        {{ if .Values.postgresql.enable_security_context }}
+        securityContext:
+          {{- toYaml $.Values.postgresql.securityContext | nindent 10 }}
+        {{ end }}
+        resources:
+          {{- toYaml $.Values.postgresql.resources | nindent 10 }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        volumeMounts:
+        - name: postgresql-data
+          mountPath: /var/lib/pgsql
+          readOnly: false
+        - mountPath: /var/run/postgresql
+          name: postgresql-run
+        {{ if .Values.backend_dev.enabled }}
+        ports:
+        - containerPort: 5432
+        {{ end }}
+        lifecycle:
+          {{- toYaml .Values.lifecycle.postgresql | nindent 10 }}
+        {{- if .Values.postgresql.probes }}
+        livenessProbe:
+          {{- toYaml .Values.postgresql.probes.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.postgresql.probes.readinessProbe | nindent 10 }}
+        startupProbe:
+          {{- toYaml .Values.postgresql.probes.startupProbe | nindent 10 }}
+        {{- end }}
+      {{ end }}
+
+      - name: httpd
+        image: {{ .Values.httpd.image | default "hyperglance/httpd-v2" }}:{{ .Values.httpd.tag | default (printf "ubi-%s" .Chart.AppVersion) }}
+        {{ if .Values.httpd.enable_security_context }}
+        securityContext:
+          {{- toYaml $.Values.httpd.securityContext | nindent 10 }}
+        {{ end }}
+        resources:
+          {{- toYaml $.Values.httpd.resources | nindent 10 }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        envFrom:
+        - configMapRef:
+            name: "{{ .Release.Name }}-env"
+        {{ if .Values.proxy.enabled }}
+        - secretRef:
+            name: "{{ .Release.Name }}-proxy-settings"
+        {{ end }}
+        lifecycle:
+          {{- toYaml .Values.lifecycle.httpd | nindent 10 }}
+        {{- if .Values.httpd.probes }}
+        livenessProbe:
+          {{- toYaml .Values.httpd.probes.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.httpd.probes.readinessProbe | nindent 10 }}
+        startupProbe:
+          {{- toYaml .Values.httpd.probes.startupProbe | nindent 10 }}
+        {{- end }}
+
+        volumeMounts:
+        - name: httpd-ssl
+          mountPath: /etc/httpd/ssl
+          readOnly: true
+
+        - name: httpd-run
+          mountPath: /etc/httpd/run
+
+        {{ if .Values.saml.enabled }}
+        - name: httpd-saml
+          mountPath: /etc/httpd/mellon
+          readOnly: true
+        {{ end }}
+
+        - name: hyperglance-data
+          mountPath: /var/log/httpd
+          subPath: httpd_logs
+          readOnly: false
+
+      - name: wildfly
+        image: {{ .Values.wildfly.image | default "hyperglance/wildfly-v2" }}:{{ .Values.wildfly.tag | default (printf "ubi-%s" .Chart.AppVersion) }}
+        {{ if .Values.wildfly.enable_security_context }}
+        securityContext:
+          {{- toYaml $.Values.wildfly.securityContext | nindent 10 }}
+        {{ end }}
+        resources:
+          {{- toYaml $.Values.wildfly.resources | nindent 10 }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+        {{ if .Values.bypassHttpd.enabled }}
+        ports:
+        - containerPort: {{ .Values.bypassHttpd.wildfly_http_port }}
+        - containerPort: {{ .Values.bypassHttpd.wildfly_https_port }}
+        {{ end }}
+        envFrom:
+        - configMapRef:
+            name: "{{ .Release.Name }}-env"
+        lifecycle:
+          {{- toYaml .Values.lifecycle.wildfly | nindent 10 }}
+        {{- if .Values.wildfly.probes }}
+        livenessProbe:
+          {{- toYaml .Values.wildfly.probes.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.wildfly.probes.readinessProbe | nindent 10 }}
+        startupProbe:
+          {{- toYaml .Values.wildfly.probes.startupProbe | nindent 10 }}
+        {{- end }}
+        {{ if .Values.customPostgres.enabled }}
+        - secretRef:
+            {{ if .Values.customPostgres.existingSecretName }}
+            name: {{ .Values.customPostgres.existingSecretName }}
+            namespace: {{ .Values.customPostgres.existingSecretNamespace }}
+            {{ else }}
+            name: "{{ .Release.Name }}-custom-postgresql-db"
+            {{ end }}
+        {{ end }}
+        {{ if .Values.proxy.enabled }}
+        - secretRef:
+            {{ if .Values.proxy.existingSecretName }}
+            name: {{ .Values.proxy.existingSecretName }}
+            namespace: {{ .Values.proxy.existingSecretNamespace }}
+            {{ else }}
+            name: "{{ .Release.Name }}-proxy-settings"
+            {{ end }}
+        {{ end }}
+
+        volumeMounts:
+        - name: hyperglance-data
+          mountPath: /var/lib/hyperglance/rules
+          subPath: rules
+          readOnly: false
+
+        - name: hyperglance-data
+          mountPath: /opt/wildfly/standalone/data/hg.bin
+          subPath: hg.bin
+          readOnly: false
+
+        - name: wildfly-deployments
+          mountPath: /opt/wildfly/standalone/deployments
+          readOnly: false 
+
+        - name: wildfly-data
+          mountPath: /opt/wildfly/standalone/data
+          readOnly: false
+
+        - name: wildfly-tmp
+          mountPath: /opt/wildfly/standalone/tmp
+          readOnly: false  
+
+        - name: wildfly-configuration
+          mountPath: /opt/wildfly/standalone/configuration
+          readOnly: false     
+
+        - name: wildfly-hyperglance
+          mountPath: /var/lib/hyperglance
+          readOnly: false                                                  
+
+        # commented out for the moment - testing emptyDir for deployments directory so we can get it running rootless and read only
+        # - name: hyperglance-data
+        #   mountPath: /opt/wildfly/standalone/deployments/hgs.ear/lib/common.jar/email.properties
+        #   subPath: email.properties
+        #   readOnly: false
+
+        - name: hyperglance-data
+          mountPath: /opt/wildfly/standalone/log
+          subPath: wildfly_logs
+          readOnly: false
+
+        - name: diagram-export
+          mountPath: /tmp/diagram-export
+          readOnly: false
+
+        - name: wildfly-cache
+          mountPath: /opt/wildfly/.cache/
+          readOnly: false        
+
+      {{ if .Values.frontend_dev.enabled }}
+      - name: "{{ .Values.frontend_dev.image}}"
+        image: "{{ .Values.frontend_dev.image}}:{{ .Values.frontend_dev.tag }}"
+        ports:
+        - containerPort: {{ .Values.frontend_dev.port }}
+      {{ end }}
+
+      volumes:
+      {{ if not .Values.customPostgres.enabled }}
+      - name: postgresql-data
+        persistentVolumeClaim:
+          claimName: hyperglance-postgresql-data
+      # Mapped to /var/run/postgresql to allow for rootless container
+      - name: postgresql-run
+        emptyDir: {}
+      {{ end }}
+      # Mapped to /var/run/apache2 to allow for rootless container with readonly filesystem enabled.
+      - name: httpd-run
+        emptyDir: {}
+      # Mapped to /opt/wildfly/standalone/deployments to allow for rootless container with readonly filesystem enabled.
+      - name: wildfly-deployments
+        emptyDir: {}
+      # Mapped to /opt/wildfly/standalone/data/ to allow for rootless container with readonly filesystem enabled.
+      - name: wildfly-data
+        emptyDir: {}   
+      # Mapped to /opt/wildfly/standalone/tmp/ to allow for rootless container with readonly filesystem enabled.
+      - name: wildfly-tmp
+        emptyDir: {}
+      # Mapped to /opt/wildfly/standalone/configuration to allow for rootless container with readonly filesystem enabled.
+      - name: wildfly-configuration
+        emptyDir: {}                        
+      # very temp - remove once we figure out what were doing with /var/lib/hyperglance/passcode
+      - name: wildfly-hyperglance
+        emptyDir: {}      
+      - name: diagram-export
+        emptyDir: {}
+
+      - name: wildfly-cache
+        emptyDir: {}
+
+      - name: httpd-ssl
+        secret:
+          {{ if .Values.httpdSSL.existingSecretName }}
+          secretName: {{ .Values.httpdSSL.existingSecretName }}
+          {{ else }}
+          secretName: hyperglance-httpd-ssl
+          {{ end }}
+      {{ if .Values.proxy.enabled }}
+      - name: proxy-settings
+        secret:
+          {{ if .Values.proxy.existingSecretName }}
+          secretName: {{ .Values.proxy.existingSecretName }}
+          {{ else }}
+          secretName: hyperglance-proxy-settings
+          {{ end }}
+      {{ end }}
+      {{ if .Values.saml.enabled }}
+      - name: httpd-saml
+        secret:
+          {{ if .Values.saml.existingSecretName }}
+          secretName: {{ .Values.saml.existingSecretName }}
+          {{ else }}
+          secretName: hyperglance-httpd-saml
+          {{ end }}
+      {{ end }}
+      - name: hyperglance-data
+        persistentVolumeClaim:
+          claimName: hyperglance-data
+      {{ if .Values.customPostgres.enabled }}
+      - name: custom-postgres-db
+        secret:
+        {{ if .Values.customPostgres.existingSecretName }}
+          secretName: {{ .Values.customPostgres.existingSecretName }}
+        {{ else}}
+          secretName: hyperglance-custom-postgresql-db
+        {{ end }}
+      {{ end }}
+      - name: license
+        secret:
+          secretName: {{ .Release.Name }}-license
+      restartPolicy: {{ .Values.restartPolicy }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      hostAliases:
+      - ip: '127.0.0.1'
+        hostnames:
+        - 'httpd'
+        - 'wildfly'
+        - 'postgresql'
